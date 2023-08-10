@@ -1,7 +1,6 @@
-LDLIBS=-lpcap
+LDLIBS=-lpcap -pthread
 
 all: arp-spoof
-
 
 main.o: mac.h ip.h get_mac.h get_ip.h ethhdr.h arphdr.h main.cpp
 

