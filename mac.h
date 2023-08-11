@@ -48,6 +48,10 @@ struct Mac final {
 		return mac_[0] == 0x01 && mac_[1] == 0x00 && mac_[2] == 0x5E && (mac_[3] & 0x80) == 0x00;
 	}
 
+	void to_str() const {
+        printf("%s\n", static_cast<std::string>(*this).c_str());
+    }
+
 	static Mac randomMac();
 	static Mac& nullMac();
 	static Mac& broadcastMac();
