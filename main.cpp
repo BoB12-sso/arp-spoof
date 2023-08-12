@@ -283,7 +283,7 @@ void relay_thread() {
         int res = pcap_next_ex(relayhandle, &header, &relaypacket);
         const EthArpPacket* eth_relay = reinterpret_cast<const EthArpPacket*>(relaypacket);
 
-        if (eth_relay->eth_.type() != EthHdr::Arp && senderMacSet.find(eth_relay->eth_.smac()) != senderMacSet.end()) {
+        if (eth_relay->eth_.type() != EthHdr::Arp && eth_relay->eth_.dmac().isBroadcast() && senderMacSet.find(eth_relay->eth_.smac()) != senderMacSet.end()) {
             EthArpPacket relay_copy;
             memcpy(&relay_copy, eth_relay, sizeof(EthArpPacket));
 			Mac smac = relay_copy.eth_.smac_;
